@@ -65,6 +65,22 @@ Run a command-line utility that streams audio from the system microphone, detect
 python record_and_predict.py
 ```
 
+## WebSocket streaming
+
+Start a server that segments with Silero VAD and returns Smart Turn predictions:
+
+```bash
+python server.py  # listens on ws://0.0.0.0:8765 by default
+```
+
+Stream a WAV file to the server (sends 16 kHz mono int16 PCM frames):
+
+```bash
+python ws_client_example.py --file path/to/audio.wav --url ws://localhost:8765
+```
+
+Send the optional `--realtime` flag to sleep between frames and mimic live capture.
+
 ## Model usage
 
 ### With Pipecat

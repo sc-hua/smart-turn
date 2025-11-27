@@ -13,3 +13,4 @@ pyaudio
 torchaudio
 onnx
 onnxruntime
+websockets
