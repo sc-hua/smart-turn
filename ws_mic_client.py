@@ -10,6 +10,26 @@ Usage examples:
 
   # Stream a specific input device
   python ws_mic_client.py --device-index 3 --url ws://localhost:8765
+  
+  # example with debug output
+  python ws_mic_client.py --device-index 3 --url ws://localhost:8765 --debug
+  [server] {"type": "ready", "message": "send 16kHz mono int16 PCM as binary frames; text 'reset' to clear state"}
+  [client] streaming microphone -> ws://localhost:8765 (Ctrl+C to stop)
+  [client] sent 50 frames (~1.6s)
+  [server] {"type": "prediction", "prediction": 1, "probability": 0.9763804078102112, "duration_seconds": 1.76, "inference_ms": 48.0109520140104, "timestamp_ms": 1764208874456}
+  [client] sent 100 frames (~3.2s)
+  [client] sent 150 frames (~4.8s)
+  [server] {"type": "prediction", "prediction": 1, "probability": 0.9785922765731812, "duration_seconds": 1.504, "inference_ms": 50.1353699946776, "timestamp_ms": 1764208877467}
+  [client] sent 200 frames (~6.4s)
+  [client] sent 250 frames (~8.0s)
+  [client] sent 300 frames (~9.6s)
+  [server] {"type": "prediction", "prediction": 0, "probability": 0.05131623148918152, "duration_seconds": 1.376, "inference_ms": 28.71188599965535, "timestamp_ms": 1764208881474}
+  [client] sent 350 frames (~11.2s)
+  [client] sent 400 frames (~12.8s)
+  [client] sent 450 frames (~14.4s)
+  [client] sent 500 frames (~16.0s)
+  [server] {"type": "prediction", "prediction": 1, "probability": 0.9739460945129395, "duration_seconds": 2.336, "inference_ms": 43.89235298731364, "timestamp_ms": 1764208887382}
+  [client] sent 550 frames (~17.6s)
 """
 
 import argparse
