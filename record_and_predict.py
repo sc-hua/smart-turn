@@ -42,8 +42,20 @@ class SileroVAD:
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
+
+        available_providers = ort.get_available_providers()
+        providers = []
+        if 'CUDAExecutionProvider' in available_providers:
+            providers.append('CUDAExecutionProvider')
+        if 'CoreMLExecutionProvider' in available_providers:
+            providers.append('CoreMLExecutionProvider')
+        if 'MPSExecutionProvider' in available_providers:
+            providers.append('MPSExecutionProvider')
+        providers.append('CPUExecutionProvider')
+        print(f"SileroVAD using providers: {providers}")
+
         self.session = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"], sess_options=opts
+            model_path, providers=providers, sess_options=opts
         )
         self.context_size = 64            # Silero uses 64-sample context at 16 kHz
         self._state = None
@@ -91,6 +103,49 @@ def ensure_model(path: str = ONNX_MODEL_PATH, url: str = ONNX_MODEL_URL) -> str:
     return path
 
 
+def select_input_device(pa: pyaudio.PyAudio) -> int:
+    """List input devices and ask user to select one."""
+    count = pa.get_device_count()
+    input_devices = []
+    # print("Scanning for input devices...")
+    for i in range(count):
+        try:
+            dev_info = pa.get_device_info_by_index(i)
+            if dev_info.get('maxInputChannels') > 0:
+                input_devices.append((i, dev_info.get('name')))
+        except Exception:
+            pass
+
+    if not input_devices:
+        print("No input devices found. Using default.")
+        return None
+
+    print("\nAvailable input devices:")
+    for idx, (dev_index, name) in enumerate(input_devices):
+        print(f"  [{idx}] {name} (ID: {dev_index})")
+
+    default_idx = 0
+    print(f"\nSelect device number [0-{len(input_devices)-1}] (default {default_idx}): ", end="")
+    
+    try:
+        selection = input().strip()
+        if selection == "":
+            selected_dev_index = input_devices[default_idx][0]
+        else:
+            list_idx = int(selection)
+            if 0 <= list_idx < len(input_devices):
+                selected_dev_index = input_devices[list_idx][0]
+            else:
+                print(f"Invalid selection. Using default: {input_devices[default_idx][1]}")
+                selected_dev_index = input_devices[default_idx][0]
+    except Exception:
+        print(f"Invalid input. Using default: {input_devices[default_idx][1]}")
+        selected_dev_index = input_devices[default_idx][0]
+        
+    print(f"Selected device ID: {selected_dev_index}\n")
+    return selected_dev_index
+
+
 def record_and_predict():
     # Derived chunk counts (avoid timestamp tracking)
     chunk_ms = (CHUNK / RATE) * 1000.0
@@ -110,11 +165,15 @@ def record_and_predict():
     # Init audio + VAD
     vad = SileroVAD(ensure_model())
     pa = pyaudio.PyAudio()
+
+    input_device_index = select_input_device(pa)
+
     stream = pa.open(
         format=FORMAT,
         channels=CHANNELS,
         rate=RATE,
         input=True,
+        input_device_index=input_device_index,
         frames_per_buffer=CHUNK,
     )
 

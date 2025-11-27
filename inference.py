@@ -9,7 +9,22 @@ def build_session(onnx_path):
     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     so.inter_op_num_threads = 1
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    return ort.InferenceSession(onnx_path, sess_options=so)
+    
+    available_providers = ort.get_available_providers()
+    providers = []
+    
+    # Prioritize GPU/NPU providers
+    if 'CUDAExecutionProvider' in available_providers:
+        providers.append('CUDAExecutionProvider')
+    if 'CoreMLExecutionProvider' in available_providers:
+        providers.append('CoreMLExecutionProvider')
+    if 'MPSExecutionProvider' in available_providers:
+        providers.append('MPSExecutionProvider')
+        
+    providers.append('CPUExecutionProvider')
+    
+    print(f"Using ONNX providers: {providers}")
+    return ort.InferenceSession(onnx_path, sess_options=so, providers=providers)
 
 feature_extractor = WhisperFeatureExtractor(chunk_length=8)
 session = build_session(ONNX_MODEL_PATH)
