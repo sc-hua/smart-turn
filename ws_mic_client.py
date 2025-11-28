@@ -110,6 +110,7 @@ async def stream_microphone(
     vad_threshold: float,
     prediction_threshold: float,
     min_duration_seconds: float,
+    vad_type: str,
 ):
     pa = pyaudio.PyAudio()
     stream = pa.open(
@@ -134,6 +135,7 @@ async def stream_microphone(
         # 配置 VAD 阈值，服务端要求建立连接后先下发配置
         config_msg = json.dumps(
             {
+                "vad_type": vad_type,
                 "vad_threshold": vad_threshold,
                 "prediction_threshold": prediction_threshold,
                 "min_duration_seconds": min_duration_seconds,
@@ -197,7 +199,8 @@ def parse_args():
     parser.add_argument("-d", "--device-index", type=int, default=None, help="PyAudio input device index.")
     parser.add_argument("-l", "--list-devices", action="store_true", help="List available input devices and exit.")
     parser.add_argument("--debug", action="store_true", help="Print send-side frame counters.")
-    parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD threshold, 0-1.")
+    parser.add_argument("--vad-type", choices=["silero", "fsmn"], default="silero", help="VAD 类型，默认为 silero，可选 fsmn。")
+    parser.add_argument("--vad-threshold", type=float, default=0.5, help="VAD threshold, 0-1.")
     parser.add_argument(
         "--prediction-threshold",
         type=float,
@@ -228,5 +231,6 @@ if __name__ == "__main__":
                 args.vad_threshold,
                 args.prediction_threshold,
                 args.min_duration_seconds,
+                args.vad_type,
             )
         )

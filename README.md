@@ -73,6 +73,8 @@ Start a server that segments with Silero VAD and returns Smart Turn predictions:
 python server.py  # listens on ws://0.0.0.0:8765 by default
 ```
 
+You can switch VAD implementation via the first config frame (default `silero`, optional `fsmn` if `funasr` and the FSMN VAD model are available).
+
 Stream a WAV file to the server (sends 16 kHz mono int16 PCM frames):
 
 ```bash

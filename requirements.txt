@@ -14,3 +14,4 @@ torchaudio
 onnx
 onnxruntime
 websockets
+funasr

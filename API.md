@@ -5,8 +5,11 @@
 ## 概述
 - **协议**：WebSocket（客户端发送二进制音频帧，服务器返回 JSON 文本帧）
 - **编码**：小端 `int16` PCM，采样率 16 kHz，单声道
-- **内部处理**：服务器以 512 个采样（32 ms）为窗口喂给 Silero VAD
-- **触发条件**：Silero VAD 判定语音段结束（至少 1 s 静音或达到 8 s 上限）即执行 `predict_endpoint`
+- **内部处理（仅服务端关注）**：默认使用 Silero VAD（512 采样，约 32 ms），可在配置中切换 FSMN VAD（200 ms 分块）；VAD 判定语音段结束（至少 1 s 静音或达到 8 s 上限）即执行 `predict_endpoint`
+
+## 角色分工（先明确谁需要做什么）
+- 服务端：启动 `server.py`，下载/加载 VAD 与 Smart Turn 模型，负责分段与预测。
+- 客户端：建立 WebSocket 连接，首帧发送配置 JSON，之后按要求推送 16 kHz `int16` PCM（二进制），接收 `vad`/`prediction` 等消息；必要时发送 `reset` 清状态。
 
 ## 服务端地址
 - 默认监听：`ws://0.0.0.0:8765`
@@ -18,25 +21,26 @@
 SMART_TURN_WS_HOST=0.0.0.0 SMART_TURN_WS_PORT=8765 python server.py
 ```
 
-## 连接流程
-1. 客户端建立 WebSocket 连接。
-2. 服务器立即回一条 JSON 文本：
+## 客户端接入流程
+1. 建立 WebSocket 连接。
+2. （服务器动作，仅供客户端知悉）服务器立即回一条 `ready` JSON，包含默认配置：
    ```json
   {
     "type": "ready",
-    "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5, \"prediction_threshold\": 0.5, \"min_duration_seconds\": 0}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
+    "message": "send config JSON as first text frame (e.g. {\"vad_type\": \"silero\", \"vad_threshold\": 0.5, \"prediction_threshold\": 0.5, \"min_duration_seconds\": 0}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
     "defaults": {
       "vad_threshold": 0.5,
       "prediction_threshold": 0.5,
-      "min_duration_seconds": 0
+      "min_duration_seconds": 0,
+      "vad_type": "silero"
     },
     "session_id": "c3b3..."
   }
    ```
-3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5, "prediction_threshold": 0.6, "min_duration_seconds": 0.3}`），服务器返回 `config` 确认。
-4. 收到确认后，客户端开始发送二进制音频帧（格式要求见下节）。如需动态调整阈值，可再次发送配置 JSON。
-5. 服务器在 VAD 语音/静音切换时发送 `vad` 消息，在语音段结束时发送 `prediction` 消息。
-6. 客户端可按需发送文本消息 `reset`，服务器会清空该连接的 VAD 状态并回执。
+3. 客户端发送配置 JSON 文本帧（如 `{"vad_type": "silero", "vad_threshold": 0.5, "prediction_threshold": 0.6, "min_duration_seconds": 0.3}`），服务器返回 `config` 确认（回显生效配置）。
+4. 收到确认后，客户端开始发送二进制音频帧（格式要求见下节）。如需动态调整阈值/切换 VAD，可再次发送配置 JSON。
+5. 服务器在 VAD 语音/静音切换时发送 `vad` 消息，在语音段结束时发送 `prediction` 消息；未达最短时长会返回 `skip`。
+6. 如需清空该连接的分段状态，客户端可发送文本消息 `reset`，服务器会回执确认。
 
 ## 音频帧要求
 - 仅发送二进制帧（不要 Base64、不要放进 JSON）。
@@ -58,6 +62,7 @@ async def stream(audio_path: str):
         await ws.send(
             json.dumps(
                 {
+                    "vad_type": "silero",  # 可改为 fsmn
                     "vad_threshold": 0.6,
                     "prediction_threshold": 0.55,
                     "min_duration_seconds": 0.3,
@@ -94,7 +99,8 @@ asyncio.run(stream("/path/to/audio.raw"))
 > 服务器返回的所有消息均包含 `session_id`，便于日志关联。
 > 所有返回中的浮点数均保留 4 位小数。
 
-### 配置 JSON
+### 配置 JSON（客户端首帧及后续动态配置）
+- `vad_type`：字符串，默认 `silero`，可选 `fsmn`。切换为 `fsmn` 需要安装 `funasr` 并准备 FSMN VAD 模型（默认 `iic/speech_fsmn_vad_zh-cn-16k-common-pytorch`）。
 - `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。
 - `prediction_threshold`：数值 `0-1`，默认 `0.5`，端点概率阈值，大于该值输出 `prediction=1`。
 - `min_duration_seconds`：数值 `>=0`，默认 `0`。单段语音长度不足该值时不执行端点预测（会返回 `skip` 提示）。
@@ -102,6 +108,7 @@ asyncio.run(stream("/path/to/audio.raw"))
 客户端发送示例（首条文本帧必须为配置）：
 ```json
 {
+    "vad_type": "silero",
     "vad_threshold": 0.6,
     "prediction_threshold": 0.55,
     "min_duration_seconds": 0.3,
@@ -117,7 +124,8 @@ asyncio.run(stream("/path/to/audio.raw"))
     "config": {
         "vad_threshold": 0.6,
         "prediction_threshold": 0.55,
-        "min_duration_seconds": 0.3
+        "min_duration_seconds": 0.3,
+        "vad_type": "silero"
     }
 }
 ```
