@@ -22,13 +22,18 @@ SMART_TURN_WS_HOST=0.0.0.0 SMART_TURN_WS_PORT=8765 python server.py
 1. 客户端建立 WebSocket 连接。
 2. 服务器立即回一条 JSON 文本：
    ```json
-   {
-     "type": "ready",
-     "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5, \"prediction_threshold\": 0.5}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
-     "defaults": {"vad_threshold": 0.5, "prediction_threshold": 0.5}
-   }
+  {
+    "type": "ready",
+    "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5, \"prediction_threshold\": 0.5, \"min_duration_seconds\": 0}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
+    "defaults": {
+      "vad_threshold": 0.5,
+      "prediction_threshold": 0.5,
+      "min_duration_seconds": 0
+    },
+    "session_id": "c3b3..."
+  }
    ```
-3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5, "prediction_threshold": 0.6}`），服务器返回 `config` 确认。
+3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5, "prediction_threshold": 0.6, "min_duration_seconds": 0.3}`），服务器返回 `config` 确认。
 4. 收到确认后，客户端开始发送二进制音频帧（格式要求见下节）。如需动态调整阈值，可再次发送配置 JSON。
 5. 服务器在 VAD 语音/静音切换时发送 `vad` 消息，在语音段结束时发送 `prediction` 消息。
 6. 客户端可按需发送文本消息 `reset`，服务器会清空该连接的 VAD 状态并回执。
@@ -46,15 +51,24 @@ import json
 import numpy as np
 import websockets
 
+
 async def stream(audio_path: str):
     async with websockets.connect("ws://localhost:8765") as ws:
         print(await ws.recv())  # ready 消息
-        await ws.send(json.dumps({"vad_threshold": 0.6, "prediction_threshold": 0.55}))  # 先下发配置
+        await ws.send(
+            json.dumps(
+                {
+                    "vad_threshold": 0.6,
+                    "prediction_threshold": 0.55,
+                    "min_duration_seconds": 0.3,
+                }
+            )
+        )  # 先下发配置
         print(await ws.recv())  # config 回执
         audio = np.fromfile(audio_path, dtype=np.int16)  # 16 kHz 单声道 PCM
         chunk = 1600  # 100 ms
         for i in range(0, len(audio), chunk):
-            await ws.send(audio[i:i+chunk].tobytes())
+            await ws.send(audio[i : i + chunk].tobytes())
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=0.01)
                 print("server ->", msg)
@@ -62,7 +76,9 @@ async def stream(audio_path: str):
                 pass
         await ws.send("reset")
 
+
 asyncio.run(stream("/path/to/audio.raw"))
+
 ```
 
 ## 消息类型
@@ -72,21 +88,37 @@ asyncio.run(stream("/path/to/audio.raw"))
 | `config`      | 服务器 → 客户端 | 客户端发送配置 JSON 后的确认回执，包含生效配置。
 | `prediction`  | 服务器 → 客户端 | 语音段结束后的端点判定（详见下文 schema）。
 | `vad`         | 服务器 → 客户端 | VAD 语音/静音切换时返回概率及阈值。
+| `skip`        | 服务器 → 客户端 | 语音段时长未达到最短长度时返回说明，未执行预测。
 | `reset`       | 双向 | 客户端发送文本 `reset` 触发清空，服务器回执确认。
 | `error`       | 服务器 → 客户端 | 出现协议或处理错误时返回，详情见 `message`。
+> 服务器返回的所有消息均包含 `session_id`，便于日志关联。
 
 ### 配置 JSON
 - `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。
 - `prediction_threshold`：数值 `0-1`，默认 `0.5`，端点概率阈值，大于该值输出 `prediction=1`。
+- `min_duration_seconds`：数值 `>=0`，默认 `0`。单段语音长度不足该值时不执行端点预测（会返回 `skip` 提示）。
 
 客户端发送示例（首条文本帧必须为配置）：
 ```json
-{"vad_threshold": 0.6, "prediction_threshold": 0.55}
+{
+    "vad_threshold": 0.6,
+    "prediction_threshold": 0.55,
+    "min_duration_seconds": 0.3,
+    "session_id": "c3b3..."
+}
 ```
 
 服务端回执示例：
 ```json
-{"type": "config", "message": "config applied", "config": {"vad_threshold": 0.6, "prediction_threshold": 0.55}}
+{
+    "type": "config",
+    "message": "config applied",
+    "config": {
+        "vad_threshold": 0.6,
+        "prediction_threshold": 0.55,
+        "min_duration_seconds": 0.3
+    }
+}
 ```
 
 ### `prediction` payload
@@ -101,7 +133,8 @@ asyncio.run(stream("/path/to/audio.raw"))
   "vad_probability": 0.12,     // 切换时最新的 VAD 概率
   "vad_speech": false,         // 该概率下是否被判定为语音
   "vad_threshold": 0.6,        // 生效的 VAD 阈值
-  "prediction_threshold": 0.55 // 生效的端点概率阈值
+  "prediction_threshold": 0.55, // 生效的端点概率阈值
+  "session_id": "c3b3..."
 }
 ```
 
@@ -113,7 +146,25 @@ asyncio.run(stream("/path/to/audio.raw"))
   "speech": true,            // 当前判定是否为语音
   "probability": 0.82,       // 对应的 VAD 概率
   "vad_threshold": 0.6,      // 生效的 VAD 阈值
-  "timestamp_ms": 1712345678901
+  "timestamp_ms": 1712345678901,
+  "session_id": "c3b3..."
+}
+```
+
+### `skip` payload
+当单段语音长度不足 `min_duration_seconds` 时返回：
+```json
+{
+  "type": "skip",
+  "reason": "min_duration_not_met",
+  "duration_seconds": 0.21,
+  "min_duration_seconds": 0.3,
+  "vad_probability": 0.08,
+  "vad_speech": false,
+  "vad_threshold": 0.5,
+  "prediction_threshold": 0.55,
+  "timestamp_ms": 1712345678901,
+  "session_id": "c3b3..."
 }
 ```
 

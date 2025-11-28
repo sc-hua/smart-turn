@@ -100,7 +100,12 @@ async def send_microphone(ws, stream, debug: bool, stop_event: asyncio.Event):
 
 
 async def stream_microphone(
-    url: str, device_index: int | None, debug: bool, vad_threshold: float, prediction_threshold: float
+    url: str,
+    device_index: int | None,
+    debug: bool,
+    vad_threshold: float,
+    prediction_threshold: float,
+    min_duration_seconds: float,
 ):
     pa = pyaudio.PyAudio()
     stream = pa.open(
@@ -124,7 +129,11 @@ async def stream_microphone(
 
         # 配置 VAD 阈值，服务端要求建立连接后先下发配置
         config_msg = json.dumps(
-            {"vad_threshold": vad_threshold, "prediction_threshold": prediction_threshold}
+            {
+                "vad_threshold": vad_threshold,
+                "prediction_threshold": prediction_threshold,
+                "min_duration_seconds": min_duration_seconds,
+            }
         )
         await ws.send(config_msg)
         try:
@@ -191,6 +200,12 @@ def parse_args():
         default=0.5,
         help="Endpoint probability threshold, 0-1.",
     )
+    parser.add_argument(
+        "--min-duration-seconds",
+        type=float,
+        default=0.0,
+        help="Minimum segment length before running endpoint prediction.",
+    )
     return parser.parse_args()
 
 
@@ -208,5 +223,6 @@ if __name__ == "__main__":
                 args.debug,
                 args.vad_threshold,
                 args.prediction_threshold,
+                args.min_duration_seconds,
             )
         )

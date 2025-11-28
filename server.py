@@ -36,6 +36,7 @@ import json
 import math
 import os
 import time
+import uuid
 from collections import deque
 from typing import Deque, List, Optional
 
@@ -52,6 +53,7 @@ CHUNK = 512  # Silero VAD expects 512 samples at 16 kHz
 
 VAD_THRESHOLD = 0.5
 PREDICTION_THRESHOLD = 0.5
+MIN_DURATION_SECONDS = 0.0
 PRE_SPEECH_MS = 200
 STOP_MS = 1000
 MAX_DURATION_SECONDS = 8
@@ -154,15 +156,20 @@ class StreamingEndpointSession:
         self.config = {
             "vad_threshold": VAD_THRESHOLD,
             "prediction_threshold": PREDICTION_THRESHOLD,
+            "min_duration_seconds": MIN_DURATION_SECONDS,
         }
         self.last_vad_speech: Optional[bool] = None
 
     def apply_config(self, config: dict) -> dict:
-        """Apply client配置，当前支持 vad_threshold/prediction_threshold."""
+        """Apply client配置，当前支持 vad_threshold/prediction_threshold/min_duration_seconds."""
         if not isinstance(config, dict):
             raise ValueError("config must be a JSON object")
 
-        unknown_keys = set(config.keys()) - {"vad_threshold", "prediction_threshold"}
+        unknown_keys = set(config.keys()) - {
+            "vad_threshold",
+            "prediction_threshold",
+            "min_duration_seconds",
+        }
         if unknown_keys:
             raise ValueError(f"unsupported config fields: {', '.join(sorted(unknown_keys))}")
 
@@ -183,6 +190,16 @@ class StreamingEndpointSession:
             if not 0.0 <= threshold <= 1.0:
                 raise ValueError("prediction_threshold must be between 0 and 1")
             new_config["prediction_threshold"] = threshold
+        if "min_duration_seconds" in config:
+            try:
+                min_dur = float(config["min_duration_seconds"])
+            except (TypeError, ValueError):
+                raise ValueError("min_duration_seconds must be a number >= 0")
+            if min_dur < 0.0:
+                raise ValueError("min_duration_seconds must be >= 0")
+            if min_dur > MAX_DURATION_SECONDS:
+                raise ValueError(f"min_duration_seconds must be <= {MAX_DURATION_SECONDS}")
+            new_config["min_duration_seconds"] = min_dur
 
         self.config = new_config
         return dict(self.config)
@@ -274,6 +291,25 @@ class StreamingEndpointSession:
         self._reset_segment_state()
 
         dur_sec = audio.size / RATE
+        min_dur = float(self.config.get("min_duration_seconds", MIN_DURATION_SECONDS))
+        if dur_sec < min_dur:
+            events.append(
+                {
+                    "type": "skip",
+                    "reason": "min_duration_not_met",
+                    "duration_seconds": float(dur_sec),
+                    "min_duration_seconds": float(min_dur),
+                    "timestamp_ms": int(time.time() * 1000),
+                    "vad_probability": vad_prob,
+                    "vad_speech": bool(is_speech),
+                    "vad_threshold": vad_threshold,
+                    "prediction_threshold": float(
+                        self.config.get("prediction_threshold", PREDICTION_THRESHOLD)
+                    ),
+                }
+            )
+            return events
+
         t0 = time.perf_counter()
         result = predict_endpoint(audio)
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -308,9 +344,11 @@ class StreamingEndpointSession:
 
 async def handle_connection(websocket):
     peer = websocket.remote_address
-    print(f"[server] connection opened from {peer}")
+    session_id = str(uuid.uuid4())
+    print(f"[server] connection opened from {peer} session_id={session_id}")
     session = StreamingEndpointSession()
     config_received = False
+    closed_logged = False
     await websocket.send(
         json.dumps(
             {
@@ -319,7 +357,9 @@ async def handle_connection(websocket):
                 "defaults": {
                     "vad_threshold": VAD_THRESHOLD,
                     "prediction_threshold": PREDICTION_THRESHOLD,
+                    "min_duration_seconds": MIN_DURATION_SECONDS,
                 },
+                "session_id": session_id,
             }
         )
     )
@@ -333,6 +373,7 @@ async def handle_connection(websocket):
                             {
                                 "type": "error",
                                 "message": "send config JSON as first text frame before audio",
+                                "session_id": session_id,
                             }
                         )
                     )
@@ -347,6 +388,7 @@ async def handle_connection(websocket):
                             {
                                 "type": "error",
                                 "message": "config must be a JSON object (text frame)",
+                                "session_id": session_id,
                             }
                         )
                     )
@@ -354,7 +396,13 @@ async def handle_connection(websocket):
                     break
                 except ValueError as exc:
                     await websocket.send(
-                        json.dumps({"type": "error", "message": f"invalid config: {exc}"})
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": f"invalid config: {exc}",
+                                "session_id": session_id,
+                            }
+                        )
                     )
                     await websocket.close(code=1002, reason="invalid config")
                     break
@@ -363,7 +411,12 @@ async def handle_connection(websocket):
                 print(f"[server] config applied for {peer}: {applied_config}")
                 await websocket.send(
                     json.dumps(
-                        {"type": "config", "message": "config applied", "config": applied_config}
+                        {
+                            "type": "config",
+                            "message": "config applied",
+                            "config": applied_config,
+                            "session_id": session_id,
+                        }
                     )
                 )
                 continue
@@ -384,7 +437,12 @@ async def handle_connection(websocket):
                     print(f"[server] config updated for {peer}: {applied_config}")
                     await websocket.send(
                         json.dumps(
-                            {"type": "config", "message": "config applied", "config": applied_config}
+                            {
+                                "type": "config",
+                                "message": "config applied",
+                                "config": applied_config,
+                                "session_id": session_id,
+                            }
                         )
                     )
                 except json.JSONDecodeError:
@@ -393,30 +451,50 @@ async def handle_connection(websocket):
                             {
                                 "type": "error",
                                 "message": "text frames must be config JSON or 'reset'",
+                                "session_id": session_id,
                             }
                         )
                     )
                 except ValueError as exc:
                     await websocket.send(
-                        json.dumps({"type": "error", "message": f"invalid config: {exc}"})
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": f"invalid config: {exc}",
+                                "session_id": session_id,
+                            }
+                        )
                     )
                 continue
 
             # Binary audio frame
             if not isinstance(message, (bytes, bytearray)):
                 await websocket.send(
-                    json.dumps({"type": "error", "message": "unsupported message type"})
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "message": "unsupported message type",
+                            "session_id": session_id,
+                        }
+                    )
                 )
                 continue
 
             if len(message) % 2 != 0:
                 await websocket.send(
-                    json.dumps({"type": "error", "message": "audio payload must be int16 PCM"})
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "message": "audio payload must be int16 PCM",
+                            "session_id": session_id,
+                        }
+                    )
                 )
                 continue
 
             samples = np.frombuffer(message, dtype=np.int16)
             for payload in session.process_audio(samples):
+                payload["session_id"] = session_id
                 if payload.get("type") == "prediction":
                     print(
                         "[server] prediction"
@@ -430,12 +508,18 @@ async def handle_connection(websocket):
 
     except websockets.ConnectionClosed as exc:
         print(f"[server] connection closed from {peer} code={exc.code} reason={exc.reason}")
+        closed_logged = True
     except Exception as exc:  # pragma: no cover - defensive logging for server mode
-        err = {"type": "error", "message": f"server exception: {exc!r}"}
+        err = {"type": "error", "message": f"server exception: {exc!r}", "session_id": session_id}
         try:
             await websocket.send(json.dumps(err))
         finally:
             raise
+    finally:
+        if not closed_logged and websocket.closed:
+            print(
+                f"[server] connection closed from {peer} session_id={session_id} code={websocket.close_code} reason={websocket.close_reason}"
+            )
 
 
 async def main():
