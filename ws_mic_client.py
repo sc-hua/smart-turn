@@ -58,7 +58,7 @@ def list_input_devices(pa: pyaudio.PyAudio):
             print(f"  [{i}] {name} (channels={info.get('maxInputChannels')})")
 
 
-async def recv_printer(ws):
+async def recv_printer(ws, stop_event: asyncio.Event):
     """Background task: print any server messages."""
     try:
         async for msg in ws:
@@ -71,17 +71,21 @@ async def recv_printer(ws):
         print(f"[client] server closed connection (normal) code={exc.code} reason={exc.reason}", flush=True)
     except ConnectionClosedError as exc:
         print(f"[client] server closed connection (error) code={exc.code} reason={exc.reason}", flush=True)
+    finally:
+        stop_event.set()
 
 
-async def send_microphone(ws, stream, debug: bool):
+async def send_microphone(ws, stream, debug: bool, stop_event: asyncio.Event):
     """Read mic frames and send to server."""
     frame_count = 0
     loop = asyncio.get_running_loop()
     try:
-        while True:
+        while not stop_event.is_set():
             data = await loop.run_in_executor(
                 None, lambda: stream.read(CHUNK, exception_on_overflow=False)
             )
+            if stop_event.is_set():
+                break
             frame_count += 1
             await ws.send(data)
             if debug and frame_count % 50 == 0:
@@ -89,9 +93,15 @@ async def send_microphone(ws, stream, debug: bool):
                 print(f"[client] sent {frame_count} frames (~{sent_seconds:.1f}s)", flush=True)
     except ConnectionClosed as exc:
         print(f"[client] send loop closed code={exc.code} reason={exc.reason}", flush=True)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        stop_event.set()
 
 
-async def stream_microphone(url: str, device_index: int | None, debug: bool, vad_threshold: float):
+async def stream_microphone(
+    url: str, device_index: int | None, debug: bool, vad_threshold: float, prediction_threshold: float
+):
     pa = pyaudio.PyAudio()
     stream = pa.open(
         format=pyaudio.paInt16,
@@ -103,6 +113,8 @@ async def stream_microphone(url: str, device_index: int | None, debug: bool, vad
     )
 
     async with connect(url, max_size=None) as ws:
+        stop_event = asyncio.Event()
+
         # Print initial ready message if present
         try:
             ready = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -111,44 +123,74 @@ async def stream_microphone(url: str, device_index: int | None, debug: bool, vad
             pass
 
         # 配置 VAD 阈值，服务端要求建立连接后先下发配置
-        config_msg = json.dumps({"vad_threshold": vad_threshold})
+        config_msg = json.dumps(
+            {"vad_threshold": vad_threshold, "prediction_threshold": prediction_threshold}
+        )
         await ws.send(config_msg)
         try:
-            config_ack = await asyncio.wait_for(ws.recv(), timeout=2.0)
-            print(f"[server] {config_ack}", flush=True)
+            raw_ack = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            print(f"[server] {raw_ack}", flush=True)
+            try:
+                config_ack = json.loads(raw_ack)
+            except Exception:
+                print("[client] invalid config ack, exiting", flush=True)
+                return
+            if config_ack.get("type") != "config":
+                print("[client] config not accepted, exiting", flush=True)
+                return
         except asyncio.TimeoutError:
-            print("[client] did not receive config ack, continue streaming", flush=True)
+            print("[client] did not receive config ack, exiting", flush=True)
+            return
 
-        recv_task = asyncio.create_task(recv_printer(ws))
-        send_task = asyncio.create_task(send_microphone(ws, stream, debug))
+        recv_task = asyncio.create_task(recv_printer(ws, stop_event))
+        send_task = asyncio.create_task(send_microphone(ws, stream, debug, stop_event))
+        stop_waiter = asyncio.create_task(stop_event.wait())
         print(f"[client] streaming microphone -> {url} (Ctrl+C to stop)", flush=True)
 
+        async def cancel_task(task, timeout: float = 1.0):
+            task.cancel()
+            with suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=timeout)
+
+        async def graceful_close():
+            stop_event.set()
+            # 停止采集，释放音频资源
+            with suppress(Exception):
+                stream.stop_stream()
+            with suppress(Exception):
+                stream.close()
+            with suppress(Exception):
+                pa.terminate()
+            # 主动关闭 websocket，唤醒 recv
+            with suppress(Exception):
+                await ws.close(code=1000, reason="client shutdown")
+                await ws.wait_closed()
+            # 结束后台任务
+            await cancel_task(send_task)
+            await cancel_task(recv_task)
+            await cancel_task(stop_waiter)
+
         try:
-            done, pending = await asyncio.wait(
-                {recv_task, send_task}, return_when=asyncio.FIRST_EXCEPTION
+            await asyncio.wait(
+                {recv_task, send_task, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
             )
-            for task in done:
-                task.result()
-        except KeyboardInterrupt:
-            pass
         finally:
-            send_task.cancel()
-            recv_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await send_task
-                await recv_task
-            stream.stop_stream()
-            stream.close()
-            pa.terminate()
+            await graceful_close()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Stream microphone audio to Smart Turn WebSocket server.")
     parser.add_argument("--url", default="ws://localhost:8765", help="WebSocket server URL.")
-    parser.add_argument("--device-index", type=int, default=None, help="PyAudio input device index.")
-    parser.add_argument("--list-devices", action="store_true", help="List available input devices and exit.")
+    parser.add_argument("-d", "--device-index", type=int, default=None, help="PyAudio input device index.")
+    parser.add_argument("-l", "--list-devices", action="store_true", help="List available input devices and exit.")
     parser.add_argument("--debug", action="store_true", help="Print send-side frame counters.")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD threshold, 0-1.")
+    parser.add_argument(
+        "--prediction-threshold",
+        type=float,
+        default=0.5,
+        help="Endpoint probability threshold, 0-1.",
+    )
     return parser.parse_args()
 
 
@@ -159,4 +201,12 @@ if __name__ == "__main__":
         list_input_devices(pa)
         pa.terminate()
     else:
-        asyncio.run(stream_microphone(args.url, args.device_index, args.debug, args.vad_threshold))
+        asyncio.run(
+            stream_microphone(
+                args.url,
+                args.device_index,
+                args.debug,
+                args.vad_threshold,
+                args.prediction_threshold,
+            )
+        )

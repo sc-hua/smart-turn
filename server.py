@@ -51,6 +51,7 @@ RATE = 16000
 CHUNK = 512  # Silero VAD expects 512 samples at 16 kHz
 
 VAD_THRESHOLD = 0.5
+PREDICTION_THRESHOLD = 0.5
 PRE_SPEECH_MS = 200
 STOP_MS = 1000
 MAX_DURATION_SECONDS = 8
@@ -150,15 +151,18 @@ class StreamingEndpointSession:
 
         self.leftover = np.array([], dtype=np.int16)
         self.vad = SileroVAD(ensure_model())
-        self.config = {"vad_threshold": VAD_THRESHOLD}
+        self.config = {
+            "vad_threshold": VAD_THRESHOLD,
+            "prediction_threshold": PREDICTION_THRESHOLD,
+        }
         self.last_vad_speech: Optional[bool] = None
 
     def apply_config(self, config: dict) -> dict:
-        """Apply client配置，当前支持 vad_threshold."""
+        """Apply client配置，当前支持 vad_threshold/prediction_threshold."""
         if not isinstance(config, dict):
             raise ValueError("config must be a JSON object")
 
-        unknown_keys = set(config.keys()) - {"vad_threshold"}
+        unknown_keys = set(config.keys()) - {"vad_threshold", "prediction_threshold"}
         if unknown_keys:
             raise ValueError(f"unsupported config fields: {', '.join(sorted(unknown_keys))}")
 
@@ -171,6 +175,14 @@ class StreamingEndpointSession:
             if not 0.0 <= threshold <= 1.0:
                 raise ValueError("vad_threshold must be between 0 and 1")
             new_config["vad_threshold"] = threshold
+        if "prediction_threshold" in config:
+            try:
+                threshold = float(config["prediction_threshold"])
+            except (TypeError, ValueError):
+                raise ValueError("prediction_threshold must be a number between 0 and 1")
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError("prediction_threshold must be between 0 and 1")
+            new_config["prediction_threshold"] = threshold
 
         self.config = new_config
         return dict(self.config)
@@ -266,17 +278,22 @@ class StreamingEndpointSession:
         result = predict_endpoint(audio)
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
+        prob = float(result.get("probability", 0.0))
+        pred_threshold = float(self.config.get("prediction_threshold", PREDICTION_THRESHOLD))
+        pred = 1 if prob > pred_threshold else 0
+
         events.append(
             {
                 "type": "prediction",
-                "prediction": int(result.get("prediction", 0)),
-                "probability": float(result.get("probability", 0.0)),
+                "prediction": pred,
+                "probability": prob,
                 "duration_seconds": float(dur_sec),
                 "inference_ms": float(latency_ms),
                 "timestamp_ms": int(time.time() * 1000),
                 "vad_probability": vad_prob,
                 "vad_speech": bool(is_speech),
                 "vad_threshold": vad_threshold,
+                "prediction_threshold": pred_threshold,
             }
         )
         return events
@@ -298,8 +315,11 @@ async def handle_connection(websocket):
         json.dumps(
             {
                 "type": "ready",
-                "message": 'send config JSON as first text frame (e.g. {"vad_threshold": 0.5}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
-                "defaults": {"vad_threshold": VAD_THRESHOLD},
+                "message": 'send config JSON as first text frame (e.g. {"vad_threshold": 0.5, "prediction_threshold": 0.5}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
+                "defaults": {
+                    "vad_threshold": VAD_THRESHOLD,
+                    "prediction_threshold": PREDICTION_THRESHOLD,
+                },
             }
         )
     )
@@ -316,22 +336,28 @@ async def handle_connection(websocket):
                             }
                         )
                     )
-                    continue
+                    await websocket.close(code=1002, reason="config required before audio")
+                    break
                 try:
                     config = json.loads(message)
                     applied_config = session.apply_config(config if config is not None else {})
                 except json.JSONDecodeError:
                     await websocket.send(
                         json.dumps(
-                            {"type": "error", "message": "config must be a JSON object (text frame)"}
+                            {
+                                "type": "error",
+                                "message": "config must be a JSON object (text frame)",
+                            }
                         )
                     )
-                    continue
+                    await websocket.close(code=1002, reason="invalid config")
+                    break
                 except ValueError as exc:
                     await websocket.send(
                         json.dumps({"type": "error", "message": f"invalid config: {exc}"})
                     )
-                    continue
+                    await websocket.close(code=1002, reason="invalid config")
+                    break
 
                 config_received = True
                 print(f"[server] config applied for {peer}: {applied_config}")

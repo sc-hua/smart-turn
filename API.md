@@ -24,11 +24,11 @@ SMART_TURN_WS_HOST=0.0.0.0 SMART_TURN_WS_PORT=8765 python server.py
    ```json
    {
      "type": "ready",
-     "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
-     "defaults": {"vad_threshold": 0.5}
+     "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5, \"prediction_threshold\": 0.5}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
+     "defaults": {"vad_threshold": 0.5, "prediction_threshold": 0.5}
    }
    ```
-3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5}`），服务器返回 `config` 确认。
+3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5, "prediction_threshold": 0.6}`），服务器返回 `config` 确认。
 4. 收到确认后，客户端开始发送二进制音频帧（格式要求见下节）。如需动态调整阈值，可再次发送配置 JSON。
 5. 服务器在 VAD 语音/静音切换时发送 `vad` 消息，在语音段结束时发送 `prediction` 消息。
 6. 客户端可按需发送文本消息 `reset`，服务器会清空该连接的 VAD 状态并回执。
@@ -49,7 +49,7 @@ import websockets
 async def stream(audio_path: str):
     async with websockets.connect("ws://localhost:8765") as ws:
         print(await ws.recv())  # ready 消息
-        await ws.send(json.dumps({"vad_threshold": 0.6}))  # 先下发配置
+        await ws.send(json.dumps({"vad_threshold": 0.6, "prediction_threshold": 0.55}))  # 先下发配置
         print(await ws.recv())  # config 回执
         audio = np.fromfile(audio_path, dtype=np.int16)  # 16 kHz 单声道 PCM
         chunk = 1600  # 100 ms
@@ -77,15 +77,16 @@ asyncio.run(stream("/path/to/audio.raw"))
 
 ### 配置 JSON
 - `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。
+- `prediction_threshold`：数值 `0-1`，默认 `0.5`，端点概率阈值，大于该值输出 `prediction=1`。
 
 客户端发送示例（首条文本帧必须为配置）：
 ```json
-{"vad_threshold": 0.6}
+{"vad_threshold": 0.6, "prediction_threshold": 0.55}
 ```
 
 服务端回执示例：
 ```json
-{"type": "config", "message": "config applied", "config": {"vad_threshold": 0.6}}
+{"type": "config", "message": "config applied", "config": {"vad_threshold": 0.6, "prediction_threshold": 0.55}}
 ```
 
 ### `prediction` payload
@@ -99,7 +100,8 @@ asyncio.run(stream("/path/to/audio.raw"))
   "timestamp_ms": 1712345678901, // 服务器发出该消息的 UNIX 毫秒时间戳
   "vad_probability": 0.12,     // 切换时最新的 VAD 概率
   "vad_speech": false,         // 该概率下是否被判定为语音
-  "vad_threshold": 0.6         // 生效的 VAD 阈值
+  "vad_threshold": 0.6,        // 生效的 VAD 阈值
+  "prediction_threshold": 0.55 // 生效的端点概率阈值
 }
 ```
 
