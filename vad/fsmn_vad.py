@@ -1,6 +1,5 @@
 """
 FSMN VAD 轻量封装，便于在 server 中复用。
-参考 _tmp/streaming-sensevoice/models/fsmn_vad.py，增加简单缓存与懒加载。
 """
 
 from typing import Iterable, Tuple
@@ -13,7 +12,7 @@ fsmn_models = {}
 class FSMNVADIterator:
     def __init__(
         self,
-        model_path: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        model_path: str = "",
         chunk_size_ms: int = 200,
         sample_rate: int = 16000,
         device: str = "cpu",
