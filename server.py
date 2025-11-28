@@ -37,6 +37,7 @@ import os
 import time
 import uuid
 from typing import List
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import websockets
@@ -56,6 +57,7 @@ from vad import (
 
 PREDICTION_THRESHOLD = 0.5
 MIN_DURATION_SECONDS = 0.0
+SHANGHAI_TZ = timezone(timedelta(hours=8))
 
 
 def format_config(cfg: dict) -> dict:
@@ -64,6 +66,12 @@ def format_config(cfg: dict) -> dict:
         k: fmt4(v) if isinstance(v, (int, float)) else v
         for k, v in cfg.items()
     }
+
+
+def log(msg: str):
+    """打印带上海时区的简洁时间戳。"""
+    ts = datetime.now(SHANGHAI_TZ).strftime("%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}")
 
 
 class StreamingEndpointSession:
@@ -245,7 +253,7 @@ class StreamingEndpointSession:
 async def handle_connection(websocket):
     peer = websocket.remote_address
     session_id = str(uuid.uuid4())
-    print(f"[server] connection opened from {peer} session_id={session_id}")
+    log(f"[server] connection opened from {peer} session_id={session_id}")
     session = StreamingEndpointSession()
     config_received = False
     closed_logged = False
@@ -313,7 +321,7 @@ async def handle_connection(websocket):
                     break
 
                 config_received = True
-                print(f"[server] config applied for {peer}: {applied_config}")
+                log(f"[server] config applied for {peer}: {applied_config}")
                 await websocket.send(
                     json.dumps(
                         {
@@ -330,7 +338,7 @@ async def handle_connection(websocket):
                 stripped = message.strip().lower()
                 if stripped == "reset":
                     session.reset()
-                    print(f"[server] state reset for {peer}")
+                    log(f"[server] state reset for {peer}")
                     await websocket.send(json.dumps({"type": "reset"}))
                     continue
 
@@ -340,7 +348,7 @@ async def handle_connection(websocket):
                         raise ValueError("config must be a JSON object")
                     applied_config = session.apply_config(config)
                     formatted_config = format_config(applied_config)
-                    print(f"[server] config updated for {peer}: {applied_config}")
+                    log(f"[server] config updated for {peer}: {applied_config}")
                     await websocket.send(
                         json.dumps(
                             {
@@ -402,7 +410,7 @@ async def handle_connection(websocket):
             for payload in session.process_audio(samples):
                 payload["session_id"] = session_id
                 if payload.get("type") == "prediction":
-                    print(
+                    log(
                         "[server] prediction"
                         f" pred={payload.get('prediction')}"
                         f" prob={payload.get('probability'):.4f}"
@@ -413,7 +421,7 @@ async def handle_connection(websocket):
                 await websocket.send(json.dumps(payload))
 
     except websockets.ConnectionClosed as exc:
-        print(f"[server] connection closed from {peer} code={exc.code} reason={exc.reason}")
+        log(f"[server] connection closed from {peer} code={exc.code} reason={exc.reason}")
         closed_logged = True
     except Exception as exc:  # pragma: no cover - defensive logging for server mode
         err = {"type": "error", "message": f"server exception: {exc!r}", "session_id": session_id}
@@ -425,13 +433,13 @@ async def handle_connection(websocket):
         if not closed_logged:
             code = getattr(websocket, "close_code", None)
             reason = getattr(websocket, "close_reason", None)
-            print(f"[server] connection closed from {peer} session_id={session_id} code={code} reason={reason}")
+            log(f"[server] connection closed from {peer} session_id={session_id} code={code} reason={reason}")
 
 
 async def main():
     host = os.getenv("SMART_TURN_WS_HOST", "0.0.0.0")
     port = int(os.getenv("SMART_TURN_WS_PORT", "8765"))
-    print(f"Starting Smart Turn WebSocket server on ws://{host}:{port}")
+    log(f"Starting Smart Turn WebSocket server on ws://{host}:{port}")
     async with serve(handle_connection, host, port, max_size=None):
         await asyncio.Future()  # run forever
 

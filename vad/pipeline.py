@@ -22,7 +22,7 @@ DEFAULT_VAD_TYPE = "silero"  # 默认仍使用 Silero
 SUPPORTED_VAD_TYPES = {"silero", "fsmn"}
 FSMN_CHUNK_MS = 200
 FSMN_VAD_MODEL_PATH = os.getenv(
-    "FSMN_VAD_MODEL_PATH", "ckpts/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+    "FSMN_VAD_MODEL_PATH", "ckpts/fsmn-vad-zh-cn-16k"
 )
 FSMN_VAD_DEVICE = os.getenv("FSMN_VAD_DEVICE", "cpu")
 
