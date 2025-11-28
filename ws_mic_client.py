@@ -12,24 +12,28 @@ Usage examples:
   python ws_mic_client.py --device-index 3 --url ws://localhost:8765
   
   # example with debug output
-  python ws_mic_client.py --device-index 3 --url ws://localhost:8765 --debug
-  [server] {"type": "ready", "message": "send 16kHz mono int16 PCM as binary frames; text 'reset' to clear state"}
-  [client] streaming microphone -> ws://localhost:8765 (Ctrl+C to stop)
+  python ws_mic_client.py --debug --vad-threshold 0.4 --prediction-threshold 0.9
+  [server] {"type": "ready", "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5, \"prediction_threshold\": 0.5}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state", "defaults": {"vad_threshold": 0.5, "prediction_threshold": 0.5, "min_duration_seconds": 0.0}, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "config", "message": "config applied", "config": {"vad_threshold": 0.4, "prediction_threshold": 0.9, "min_duration_seconds": 1.0}, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [client] streaming microphone -> ws://10.10.9.145:8765 (Ctrl+C to stop)
+  [server] {"type": "vad", "speech": false, "probability": 0.008, "vad_threshold": 0.4, "timestamp_ms": 1764317716644, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
   [client] sent 50 frames (~1.6s)
-  [server] {"type": "prediction", "prediction": 1, "probability": 0.9763804078102112, "duration_seconds": 1.76, "inference_ms": 48.0109520140104, "timestamp_ms": 1764208874456}
   [client] sent 100 frames (~3.2s)
+  [server] {"type": "vad", "speech": true, "probability": 0.4428, "vad_threshold": 0.4, "timestamp_ms": 1764317719989, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": false, "probability": 0.3659, "vad_threshold": 0.4, "timestamp_ms": 1764317720568, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
   [client] sent 150 frames (~4.8s)
-  [server] {"type": "prediction", "prediction": 1, "probability": 0.9785922765731812, "duration_seconds": 1.504, "inference_ms": 50.1353699946776, "timestamp_ms": 1764208877467}
+  [server] {"type": "prediction", "prediction": 1, "probability": 0.9673, "duration_seconds": 1.824, "inference_ms": 55.8826, "timestamp_ms": 1764317721618, "vad_probability": 0.0168, "vad_speech": false, "vad_threshold": 0.4, "prediction_threshold": 0.9, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
   [client] sent 200 frames (~6.4s)
   [client] sent 250 frames (~8.0s)
+  [server] {"type": "vad", "speech": true, "probability": 0.6303, "vad_threshold": 0.4, "timestamp_ms": 1764317725369, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": false, "probability": 0.1945, "vad_threshold": 0.4, "timestamp_ms": 1764317725399, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": true, "probability": 0.5911, "vad_threshold": 0.4, "timestamp_ms": 1764317725430, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": false, "probability": 0.2594, "vad_threshold": 0.4, "timestamp_ms": 1764317725462, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": true, "probability": 0.4268, "vad_threshold": 0.4, "timestamp_ms": 1764317725657, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
+  [server] {"type": "vad", "speech": false, "probability": 0.2414, "vad_threshold": 0.4, "timestamp_ms": 1764317725721, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
   [client] sent 300 frames (~9.6s)
-  [server] {"type": "prediction", "prediction": 0, "probability": 0.05131623148918152, "duration_seconds": 1.376, "inference_ms": 28.71188599965535, "timestamp_ms": 1764208881474}
+  [server] {"type": "prediction", "prediction": 0, "probability": 0.4251, "duration_seconds": 1.6, "inference_ms": 39.5469, "timestamp_ms": 1764317726748, "vad_probability": 0.0214, "vad_speech": false, "vad_threshold": 0.4, "prediction_threshold": 0.9, "session_id": "6bb011e7-35aa-479a-9142-5743520c71d5"}
   [client] sent 350 frames (~11.2s)
-  [client] sent 400 frames (~12.8s)
-  [client] sent 450 frames (~14.4s)
-  [client] sent 500 frames (~16.0s)
-  [server] {"type": "prediction", "prediction": 1, "probability": 0.9739460945129395, "duration_seconds": 2.336, "inference_ms": 43.89235298731364, "timestamp_ms": 1764208887382}
-  [client] sent 550 frames (~17.6s)
 """
 
 import argparse
