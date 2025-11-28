@@ -4,10 +4,16 @@ endpoint predictions whenever a VAD-detected segment completes.
 
 Protocol
 --------
-- Clients send binary frames containing raw little-endian int16 PCM audio
-  sampled at 16 kHz, mono.
+- Clients first send a config JSON text frame (e.g. {"vad_threshold": 0.5});
+  server replies with a config echo.
+- Clients then send binary frames containing raw little-endian int16 PCM audio
+  sampled at 16 kHz, mono. Text "reset" clears VAD/segment state.
 - Audio can arrive in any chunk size; the server buffers and processes it in
   512-sample (32 ms) windows to match Silero VAD expectations.
+- Whenever VAD speech/silence flips, the server sends a JSON text frame:
+
+    {"type": "vad", "speech": true, "probability": 0.82, "vad_threshold": 0.5, "timestamp_ms": ...}
+
 - When the server decides a speech segment has ended (silence or max duration),
   it runs `predict_endpoint` on the collected audio (up to 8 seconds) and sends
   a JSON text frame like:
@@ -17,10 +23,12 @@ Protocol
       "prediction": 1,              # 1 = complete, 0 = incomplete
       "probability": 0.73,
       "duration_seconds": 3.12,
-      "timestamp_ms": 1712345678901
+      "timestamp_ms": 1712345678901,
+      "vad_probability": 0.12,
+      "vad_speech": false,
+      "vad_threshold": 0.5
     }
 
-- Optional text message `reset` clears VAD and segment state for the connection.
 """
 
 import asyncio
@@ -142,6 +150,30 @@ class StreamingEndpointSession:
 
         self.leftover = np.array([], dtype=np.int16)
         self.vad = SileroVAD(ensure_model())
+        self.config = {"vad_threshold": VAD_THRESHOLD}
+        self.last_vad_speech: Optional[bool] = None
+
+    def apply_config(self, config: dict) -> dict:
+        """Apply client配置，当前支持 vad_threshold."""
+        if not isinstance(config, dict):
+            raise ValueError("config must be a JSON object")
+
+        unknown_keys = set(config.keys()) - {"vad_threshold"}
+        if unknown_keys:
+            raise ValueError(f"unsupported config fields: {', '.join(sorted(unknown_keys))}")
+
+        new_config = dict(self.config)
+        if "vad_threshold" in config:
+            try:
+                threshold = float(config["vad_threshold"])
+            except (TypeError, ValueError):
+                raise ValueError("vad_threshold must be a number between 0 and 1")
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError("vad_threshold must be between 0 and 1")
+            new_config["vad_threshold"] = threshold
+
+        self.config = new_config
+        return dict(self.config)
 
     def reset(self):
         """Clear VAD buffers and segment state."""
@@ -152,16 +184,17 @@ class StreamingEndpointSession:
         self.since_trigger_chunks = 0
         self.leftover = np.array([], dtype=np.int16)
         self.vad._init_states()
+        self.last_vad_speech = None
 
     def process_audio(self, int16_audio: np.ndarray) -> List[dict]:
         """
         Ingest new int16 samples, process in CHUNK windows, and return any
-        prediction payloads that should be sent to the client.
+        payloads (vad变化或预测结果) that should be sent to the client.
         """
-        predictions: List[dict] = []
+        messages: List[dict] = []
 
         if int16_audio.size == 0:
-            return predictions
+            return messages
 
         # Combine with any partial samples from the previous message
         if self.leftover.size:
@@ -176,15 +209,30 @@ class StreamingEndpointSession:
             chunk_int16 = int16_audio[start:end]
             chunk_f32 = (chunk_int16.astype(np.float32)) / 32768.0
 
-            prediction = self._handle_chunk(chunk_f32)
-            if prediction is not None:
-                predictions.append(prediction)
+            messages.extend(self._handle_chunk(chunk_f32))
 
-        return predictions
+        return messages
 
-    def _handle_chunk(self, chunk_f32: np.ndarray) -> Optional[dict]:
-        """Run VAD on a single chunk and, if a segment ends, return prediction dict."""
-        is_speech = self.vad.prob(chunk_f32) > VAD_THRESHOLD
+    def _handle_chunk(self, chunk_f32: np.ndarray) -> List[dict]:
+        """Run VAD on a single chunk并返回需要下发的消息。"""
+        events: List[dict] = []
+        vad_prob = float(self.vad.prob(chunk_f32))
+        vad_threshold = float(self.config.get("vad_threshold", VAD_THRESHOLD))
+        is_speech = vad_prob > vad_threshold
+        ts_ms = int(time.time() * 1000)
+
+        # VAD状态变化时推送一次
+        if self.last_vad_speech is None or is_speech != self.last_vad_speech:
+            self.last_vad_speech = is_speech
+            events.append(
+                {
+                    "type": "vad",
+                    "speech": bool(is_speech),
+                    "probability": vad_prob,
+                    "vad_threshold": vad_threshold,
+                    "timestamp_ms": ts_ms,
+                }
+            )
 
         if not self.speech_active:
             self.pre_buffer.append(chunk_f32)
@@ -194,7 +242,7 @@ class StreamingEndpointSession:
                 self.speech_active = True
                 self.trailing_silence = 0
                 self.since_trigger_chunks = 1
-            return None
+            return events
 
         # Already in a segment
         self.segment.append(chunk_f32)
@@ -207,7 +255,7 @@ class StreamingEndpointSession:
         )
 
         if not segment_should_end:
-            return None
+            return events
 
         # Finalize segment
         audio = np.concatenate(self.segment, dtype=np.float32)
@@ -218,14 +266,20 @@ class StreamingEndpointSession:
         result = predict_endpoint(audio)
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
-        return {
-            "type": "prediction",
-            "prediction": int(result.get("prediction", 0)),
-            "probability": float(result.get("probability", 0.0)),
-            "duration_seconds": float(dur_sec),
-            "inference_ms": float(latency_ms),
-            "timestamp_ms": int(time.time() * 1000),
-        }
+        events.append(
+            {
+                "type": "prediction",
+                "prediction": int(result.get("prediction", 0)),
+                "probability": float(result.get("probability", 0.0)),
+                "duration_seconds": float(dur_sec),
+                "inference_ms": float(latency_ms),
+                "timestamp_ms": int(time.time() * 1000),
+                "vad_probability": vad_prob,
+                "vad_speech": bool(is_speech),
+                "vad_threshold": vad_threshold,
+            }
+        )
+        return events
 
     def _reset_segment_state(self):
         self.segment.clear()
@@ -239,25 +293,86 @@ async def handle_connection(websocket):
     peer = websocket.remote_address
     print(f"[server] connection opened from {peer}")
     session = StreamingEndpointSession()
+    config_received = False
     await websocket.send(
         json.dumps(
             {
                 "type": "ready",
-                "message": "send 16kHz mono int16 PCM as binary frames; text 'reset' to clear state",
+                "message": 'send config JSON as first text frame (e.g. {"vad_threshold": 0.5}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
+                "defaults": {"vad_threshold": VAD_THRESHOLD},
             }
         )
     )
 
     try:
         async for message in websocket:
+            if not config_received:
+                if not isinstance(message, str):
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": "send config JSON as first text frame before audio",
+                            }
+                        )
+                    )
+                    continue
+                try:
+                    config = json.loads(message)
+                    applied_config = session.apply_config(config if config is not None else {})
+                except json.JSONDecodeError:
+                    await websocket.send(
+                        json.dumps(
+                            {"type": "error", "message": "config must be a JSON object (text frame)"}
+                        )
+                    )
+                    continue
+                except ValueError as exc:
+                    await websocket.send(
+                        json.dumps({"type": "error", "message": f"invalid config: {exc}"})
+                    )
+                    continue
+
+                config_received = True
+                print(f"[server] config applied for {peer}: {applied_config}")
+                await websocket.send(
+                    json.dumps(
+                        {"type": "config", "message": "config applied", "config": applied_config}
+                    )
+                )
+                continue
+
             if isinstance(message, str):
-                if message.strip().lower() == "reset":
+                stripped = message.strip().lower()
+                if stripped == "reset":
                     session.reset()
                     print(f"[server] state reset for {peer}")
                     await websocket.send(json.dumps({"type": "reset"}))
-                else:
+                    continue
+
+                try:
+                    config = json.loads(message)
+                    if not isinstance(config, dict):
+                        raise ValueError("config must be a JSON object")
+                    applied_config = session.apply_config(config)
+                    print(f"[server] config updated for {peer}: {applied_config}")
                     await websocket.send(
-                        json.dumps({"type": "error", "message": "send audio as binary frames"})
+                        json.dumps(
+                            {"type": "config", "message": "config applied", "config": applied_config}
+                        )
+                    )
+                except json.JSONDecodeError:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": "text frames must be config JSON or 'reset'",
+                            }
+                        )
+                    )
+                except ValueError as exc:
+                    await websocket.send(
+                        json.dumps({"type": "error", "message": f"invalid config: {exc}"})
                     )
                 continue
 

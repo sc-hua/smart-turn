@@ -24,12 +24,14 @@ SMART_TURN_WS_HOST=0.0.0.0 SMART_TURN_WS_PORT=8765 python server.py
    ```json
    {
      "type": "ready",
-     "message": "send 16kHz mono int16 PCM as binary frames; text 'reset' to clear state"
+     "message": "send config JSON as first text frame (e.g. {\"vad_threshold\": 0.5}), then 16kHz mono int16 PCM as binary frames; text \"reset\" to clear state",
+     "defaults": {"vad_threshold": 0.5}
    }
    ```
-3. 客户端开始发送二进制音频帧（格式要求见下节）。
-4. 每当语音段结束，服务器发送一条 `prediction` JSON 文本。
-5. 客户端可按需发送文本消息 `reset`，服务器会清空该连接的 VAD 状态并回执。
+3. 客户端发送配置 JSON 文本帧（如 `{"vad_threshold": 0.5}`），服务器返回 `config` 确认。
+4. 收到确认后，客户端开始发送二进制音频帧（格式要求见下节）。如需动态调整阈值，可再次发送配置 JSON。
+5. 服务器在 VAD 语音/静音切换时发送 `vad` 消息，在语音段结束时发送 `prediction` 消息。
+6. 客户端可按需发送文本消息 `reset`，服务器会清空该连接的 VAD 状态并回执。
 
 ## 音频帧要求
 - 仅发送二进制帧（不要 Base64、不要放进 JSON）。
@@ -47,6 +49,8 @@ import websockets
 async def stream(audio_path: str):
     async with websockets.connect("ws://localhost:8765") as ws:
         print(await ws.recv())  # ready 消息
+        await ws.send(json.dumps({"vad_threshold": 0.6}))  # 先下发配置
+        print(await ws.recv())  # config 回执
         audio = np.fromfile(audio_path, dtype=np.int16)  # 16 kHz 单声道 PCM
         chunk = 1600  # 100 ms
         for i in range(0, len(audio), chunk):
@@ -64,10 +68,25 @@ asyncio.run(stream("/path/to/audio.raw"))
 ## 消息类型
 | `type`        | 方向 | 说明 |
 |---------------|------|------|
-| `ready`       | 服务器 → 客户端 | 握手成功后发送，描述期望 payload。
+| `ready`       | 服务器 → 客户端 | 握手成功后发送，描述期望 payload 和默认配置。
+| `config`      | 服务器 → 客户端 | 客户端发送配置 JSON 后的确认回执，包含生效配置。
 | `prediction`  | 服务器 → 客户端 | 语音段结束后的端点判定（详见下文 schema）。
+| `vad`         | 服务器 → 客户端 | VAD 语音/静音切换时返回概率及阈值。
 | `reset`       | 双向 | 客户端发送文本 `reset` 触发清空，服务器回执确认。
 | `error`       | 服务器 → 客户端 | 出现协议或处理错误时返回，详情见 `message`。
+
+### 配置 JSON
+- `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。
+
+客户端发送示例（首条文本帧必须为配置）：
+```json
+{"vad_threshold": 0.6}
+```
+
+服务端回执示例：
+```json
+{"type": "config", "message": "config applied", "config": {"vad_threshold": 0.6}}
+```
 
 ### `prediction` payload
 ```json
@@ -77,7 +96,22 @@ asyncio.run(stream("/path/to/audio.raw"))
   "probability": 0.73,        // 模型置信度 0-1
   "duration_seconds": 3.12,   // 刚结束的语音段长度
   "inference_ms": 18.4,       // 端点模型推理耗时
-  "timestamp_ms": 1712345678901 // 服务器发出该消息的 UNIX 毫秒时间戳
+  "timestamp_ms": 1712345678901, // 服务器发出该消息的 UNIX 毫秒时间戳
+  "vad_probability": 0.12,     // 切换时最新的 VAD 概率
+  "vad_speech": false,         // 该概率下是否被判定为语音
+  "vad_threshold": 0.6         // 生效的 VAD 阈值
+}
+```
+
+### `vad` payload
+当 VAD 判定由静音变为语音，或由语音变为静音时返回：
+```json
+{
+  "type": "vad",
+  "speech": true,            // 当前判定是否为语音
+  "probability": 0.82,       // 对应的 VAD 概率
+  "vad_threshold": 0.6,      // 生效的 VAD 阈值
+  "timestamp_ms": 1712345678901
 }
 ```
 

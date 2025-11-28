@@ -91,7 +91,7 @@ async def send_microphone(ws, stream, debug: bool):
         print(f"[client] send loop closed code={exc.code} reason={exc.reason}", flush=True)
 
 
-async def stream_microphone(url: str, device_index: int | None, debug: bool):
+async def stream_microphone(url: str, device_index: int | None, debug: bool, vad_threshold: float):
     pa = pyaudio.PyAudio()
     stream = pa.open(
         format=pyaudio.paInt16,
@@ -109,6 +109,15 @@ async def stream_microphone(url: str, device_index: int | None, debug: bool):
             print(f"[server] {ready}", flush=True)
         except asyncio.TimeoutError:
             pass
+
+        # 配置 VAD 阈值，服务端要求建立连接后先下发配置
+        config_msg = json.dumps({"vad_threshold": vad_threshold})
+        await ws.send(config_msg)
+        try:
+            config_ack = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            print(f"[server] {config_ack}", flush=True)
+        except asyncio.TimeoutError:
+            print("[client] did not receive config ack, continue streaming", flush=True)
 
         recv_task = asyncio.create_task(recv_printer(ws))
         send_task = asyncio.create_task(send_microphone(ws, stream, debug))
@@ -139,6 +148,7 @@ def parse_args():
     parser.add_argument("--device-index", type=int, default=None, help="PyAudio input device index.")
     parser.add_argument("--list-devices", action="store_true", help="List available input devices and exit.")
     parser.add_argument("--debug", action="store_true", help="Print send-side frame counters.")
+    parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD threshold, 0-1.")
     return parser.parse_args()
 
 
@@ -149,4 +159,4 @@ if __name__ == "__main__":
         list_input_devices(pa)
         pa.terminate()
     else:
-        asyncio.run(stream_microphone(args.url, args.device_index, args.debug))
+        asyncio.run(stream_microphone(args.url, args.device_index, args.debug, args.vad_threshold))
