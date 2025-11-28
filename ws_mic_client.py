@@ -203,7 +203,7 @@ def parse_args():
     parser.add_argument(
         "--min-duration-seconds",
         type=float,
-        default=0.0,
+        default=1.0,
         help="Minimum segment length before running endpoint prediction.",
     )
     return parser.parse_args()

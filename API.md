@@ -92,6 +92,7 @@ asyncio.run(stream("/path/to/audio.raw"))
 | `reset`       | 双向 | 客户端发送文本 `reset` 触发清空，服务器回执确认。
 | `error`       | 服务器 → 客户端 | 出现协议或处理错误时返回，详情见 `message`。
 > 服务器返回的所有消息均包含 `session_id`，便于日志关联。
+> 所有返回中的浮点数均保留 4 位小数。
 
 ### 配置 JSON
 - `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。

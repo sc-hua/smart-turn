@@ -58,6 +58,18 @@ PRE_SPEECH_MS = 200
 STOP_MS = 1000
 MAX_DURATION_SECONDS = 8
 
+def fmt4(value: float) -> float:
+    """Round float to 4 decimal places for consistent WS payloads."""
+    return round(float(value), 4)
+
+
+def format_config(cfg: dict) -> dict:
+    """返回浮点数保留 4 位的小数配置副本。"""
+    return {
+        k: fmt4(v) if isinstance(v, (int, float)) else v
+        for k, v in cfg.items()
+    }
+
 # Silero ONNX model
 ONNX_MODEL_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
@@ -248,6 +260,8 @@ class StreamingEndpointSession:
         vad_prob = float(self.vad.prob(chunk_f32))
         vad_threshold = float(self.config.get("vad_threshold", VAD_THRESHOLD))
         is_speech = vad_prob > vad_threshold
+        vad_prob_fmt = fmt4(vad_prob)
+        vad_threshold_fmt = fmt4(vad_threshold)
         ts_ms = int(time.time() * 1000)
 
         # VAD状态变化时推送一次
@@ -257,8 +271,8 @@ class StreamingEndpointSession:
                 {
                     "type": "vad",
                     "speech": bool(is_speech),
-                    "probability": vad_prob,
-                    "vad_threshold": vad_threshold,
+                    "probability": vad_prob_fmt,
+                    "vad_threshold": vad_threshold_fmt,
                     "timestamp_ms": ts_ms,
                 }
             )
@@ -291,19 +305,21 @@ class StreamingEndpointSession:
         self._reset_segment_state()
 
         dur_sec = audio.size / RATE
+        dur_sec_fmt = fmt4(dur_sec)
         min_dur = float(self.config.get("min_duration_seconds", MIN_DURATION_SECONDS))
+        min_dur_fmt = fmt4(min_dur)
         if dur_sec < min_dur:
             events.append(
                 {
                     "type": "skip",
                     "reason": "min_duration_not_met",
-                    "duration_seconds": float(dur_sec),
-                    "min_duration_seconds": float(min_dur),
+                    "duration_seconds": dur_sec_fmt,
+                    "min_duration_seconds": min_dur_fmt,
                     "timestamp_ms": int(time.time() * 1000),
-                    "vad_probability": vad_prob,
+                    "vad_probability": vad_prob_fmt,
                     "vad_speech": bool(is_speech),
-                    "vad_threshold": vad_threshold,
-                    "prediction_threshold": float(
+                    "vad_threshold": vad_threshold_fmt,
+                    "prediction_threshold": fmt4(
                         self.config.get("prediction_threshold", PREDICTION_THRESHOLD)
                     ),
                 }
@@ -315,21 +331,23 @@ class StreamingEndpointSession:
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         prob = float(result.get("probability", 0.0))
+        prob_fmt = fmt4(prob)
         pred_threshold = float(self.config.get("prediction_threshold", PREDICTION_THRESHOLD))
+        pred_threshold_fmt = fmt4(pred_threshold)
         pred = 1 if prob > pred_threshold else 0
 
         events.append(
             {
                 "type": "prediction",
                 "prediction": pred,
-                "probability": prob,
-                "duration_seconds": float(dur_sec),
-                "inference_ms": float(latency_ms),
+                "probability": prob_fmt,
+                "duration_seconds": dur_sec_fmt,
+                "inference_ms": fmt4(latency_ms),
                 "timestamp_ms": int(time.time() * 1000),
-                "vad_probability": vad_prob,
+                "vad_probability": vad_prob_fmt,
                 "vad_speech": bool(is_speech),
-                "vad_threshold": vad_threshold,
-                "prediction_threshold": pred_threshold,
+                "vad_threshold": vad_threshold_fmt,
+                "prediction_threshold": pred_threshold_fmt,
             }
         )
         return events
@@ -349,16 +367,19 @@ async def handle_connection(websocket):
     session = StreamingEndpointSession()
     config_received = False
     closed_logged = False
+    ready_defaults = format_config(
+        {
+            "vad_threshold": VAD_THRESHOLD,
+            "prediction_threshold": PREDICTION_THRESHOLD,
+            "min_duration_seconds": MIN_DURATION_SECONDS,
+        }
+    )
     await websocket.send(
         json.dumps(
             {
                 "type": "ready",
                 "message": 'send config JSON as first text frame (e.g. {"vad_threshold": 0.5, "prediction_threshold": 0.5}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
-                "defaults": {
-                    "vad_threshold": VAD_THRESHOLD,
-                    "prediction_threshold": PREDICTION_THRESHOLD,
-                    "min_duration_seconds": MIN_DURATION_SECONDS,
-                },
+                "defaults": ready_defaults,
                 "session_id": session_id,
             }
         )
@@ -382,6 +403,7 @@ async def handle_connection(websocket):
                 try:
                     config = json.loads(message)
                     applied_config = session.apply_config(config if config is not None else {})
+                    formatted_config = format_config(applied_config)
                 except json.JSONDecodeError:
                     await websocket.send(
                         json.dumps(
@@ -414,7 +436,7 @@ async def handle_connection(websocket):
                         {
                             "type": "config",
                             "message": "config applied",
-                            "config": applied_config,
+                            "config": formatted_config,
                             "session_id": session_id,
                         }
                     )
@@ -434,13 +456,14 @@ async def handle_connection(websocket):
                     if not isinstance(config, dict):
                         raise ValueError("config must be a JSON object")
                     applied_config = session.apply_config(config)
+                    formatted_config = format_config(applied_config)
                     print(f"[server] config updated for {peer}: {applied_config}")
                     await websocket.send(
                         json.dumps(
                             {
                                 "type": "config",
                                 "message": "config applied",
-                                "config": applied_config,
+                                "config": formatted_config,
                                 "session_id": session_id,
                             }
                         )
@@ -516,10 +539,10 @@ async def handle_connection(websocket):
         finally:
             raise
     finally:
-        if not closed_logged and websocket.closed:
-            print(
-                f"[server] connection closed from {peer} session_id={session_id} code={websocket.close_code} reason={websocket.close_reason}"
-            )
+        if not closed_logged:
+            code = getattr(websocket, "close_code", None)
+            reason = getattr(websocket, "close_reason", None)
+            print(f"[server] connection closed from {peer} session_id={session_id} code={code} reason={reason}")
 
 
 async def main():
