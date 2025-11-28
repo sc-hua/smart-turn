@@ -86,6 +86,8 @@ class StreamingEndpointSession:
             "vad_type": DEFAULT_VAD_TYPE,
         }
         self.vad_pipeline = self._build_vad_pipeline(self.config["vad_type"])
+        self.active_segment_id = None
+        self.next_segment_id = 1
 
     def _build_vad_pipeline(self, vad_type: str):
         if vad_type == "fsmn":
@@ -183,13 +185,29 @@ class StreamingEndpointSession:
             end = start + chunk_size
             chunk_int16 = int16_audio[start:end]
             events, segments = self.vad_pipeline.process_chunk(chunk_int16)
-            messages.extend(events)
+            # 先处理 VAD 事件，标记 segment_id
+            clear_after_segment = False
+            for event in events:
+                if event.get("type") == "vad":
+                    if bool(event.get("speech")):
+                        if self.active_segment_id is None:
+                            self.active_segment_id = self.next_segment_id
+                            self.next_segment_id += 1
+                    else:
+                        clear_after_segment = True
+                    if self.active_segment_id is not None:
+                        event["segment_id"] = self.active_segment_id
+                messages.append(event)
+            # 再处理语音段（预测/skip），携带 segment_id
             for seg in segments:
-                messages.extend(self._process_segment(seg))
+                messages.extend(self._process_segment(seg, segment_id=self.active_segment_id))
+                clear_after_segment = True
+            if clear_after_segment:
+                self.active_segment_id = None
 
         return messages
 
-    def _process_segment(self, segment: dict) -> List[dict]:
+    def _process_segment(self, segment: dict, segment_id: int | None = None) -> List[dict]:
         """对单段语音执行最短时长校验与端点预测。"""
         events: List[dict] = []
         audio = segment.get("audio", np.array([], dtype=np.float32))
@@ -209,6 +227,7 @@ class StreamingEndpointSession:
             events.append(
                 {
                     "type": "skip",
+                    "segment_id": segment_id,
                     "reason": "min_duration_not_met",
                     "duration_seconds": dur_sec_fmt,
                     "min_duration_seconds": min_dur_fmt,
@@ -236,6 +255,7 @@ class StreamingEndpointSession:
         events.append(
             {
                 "type": "prediction",
+                "segment_id": segment_id,
                 "prediction": pred,
                 "probability": prob_fmt,
                 "duration_seconds": dur_sec_fmt,
