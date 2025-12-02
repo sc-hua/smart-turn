@@ -38,14 +38,22 @@ class SileroVAD:
         opts.intra_op_num_threads = 1
 
         available_providers = ort.get_available_providers()
-        providers = []
-        if "CUDAExecutionProvider" in available_providers:
-            providers.append("CUDAExecutionProvider")
-        if "CoreMLExecutionProvider" in available_providers:
-            providers.append("CoreMLExecutionProvider")
-        if "MPSExecutionProvider" in available_providers:
-            providers.append("MPSExecutionProvider")
-        providers.append("CPUExecutionProvider")
+        requested = os.getenv("SILERO_VAD_PROVIDERS")
+        if requested:
+            order = [name.strip() for name in requested.split(",") if name.strip()]
+        else:
+            # 默认使用 CPU，benchmark 表明 Silero 这类小模型在 GPU 上反而更慢。
+            order = [
+                "CPUExecutionProvider",
+                "CUDAExecutionProvider",
+                "MPSExecutionProvider",
+                "CoreMLExecutionProvider",
+            ]
+
+        providers = [p for p in order if p in available_providers]
+        if not providers:
+            providers = ["CPUExecutionProvider"]
+
         print(f"SileroVAD using providers: {providers}")
 
         self.session = ort.InferenceSession(

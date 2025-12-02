@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import onnxruntime as ort
 from transformers import WhisperFeatureExtractor
@@ -11,19 +13,23 @@ def build_session(onnx_path):
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     
     available_providers = ort.get_available_providers()
-    providers = []
+    requested = os.getenv("SMART_TURN_PROVIDERS")
+    if requested:
+        order = [name.strip() for name in requested.split(",") if name.strip()]
+    else:
+        # 默认仍优先尝试 CUDA，其次回退 CPU，避免追加过多 provider 导致不稳定的 GPU/CPU 混用。
+        order = [
+            'CUDAExecutionProvider',
+            'CPUExecutionProvider',
+            'MPSExecutionProvider',
+            'CoreMLExecutionProvider',
+        ]
+
+    providers = [p for p in order if p in available_providers]
+    if not providers:
+        providers = ['CPUExecutionProvider']
     
-    # Prioritize GPU/NPU providers
-    if 'CUDAExecutionProvider' in available_providers:
-        providers.append('CUDAExecutionProvider')
-    if 'CoreMLExecutionProvider' in available_providers:
-        providers.append('CoreMLExecutionProvider')
-    if 'MPSExecutionProvider' in available_providers:
-        providers.append('MPSExecutionProvider')
-        
-    providers.append('CPUExecutionProvider')
-    
-    print(f"Using ONNX providers: {providers}")
+    print(f"SmartTurn using ONNX providers: {providers}")
     return ort.InferenceSession(onnx_path, sess_options=so, providers=providers)
 
 feature_extractor = WhisperFeatureExtractor(chunk_length=8)
