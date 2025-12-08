@@ -49,6 +49,7 @@ from vad import (
     SUPPORTED_VAD_TYPES,
     FSMNVADPipeline,
     SileroVADPipeline,
+    TenVADPipeline,
     VAD_THRESHOLD,
     MAX_DURATION_SECONDS,
     RATE,
@@ -92,6 +93,8 @@ class StreamingEndpointSession:
     def _build_vad_pipeline(self, vad_type: str):
         if vad_type == "fsmn":
             return FSMNVADPipeline(self.config)
+        elif vad_type == "ten":
+            return TenVADPipeline(self.config)
         return SileroVADPipeline(self.config)
 
     def _set_vad_pipeline(self, vad_type: str):

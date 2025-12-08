@@ -10,6 +10,7 @@ import numpy as np
 
 from .fsmn_vad import FSMNVADIterator
 from .silero_vad import CHUNK, SileroVAD, ensure_model
+from .ten_vad import TEN_VAD_CHUNK, TenVAD
 
 RATE = 16000
 
@@ -19,10 +20,10 @@ STOP_MS = 1000
 MAX_DURATION_SECONDS = 8
 
 DEFAULT_VAD_TYPE = "silero"  # 默认仍使用 Silero
-SUPPORTED_VAD_TYPES = {"silero", "fsmn"}
+SUPPORTED_VAD_TYPES = {"silero", "fsmn", "ten"}
 FSMN_CHUNK_MS = 200
 FSMN_VAD_MODEL_PATH = os.getenv(
-    "FSMN_VAD_MODEL_PATH", "ckpts/fsmn-vad-zh-cn-16k"
+    "FSMN_VAD_MODEL_PATH", "onnx_model/fsmn-vad-zh-cn-16k"
 )
 FSMN_VAD_DEVICE = os.getenv("FSMN_VAD_DEVICE", "cpu")
 
@@ -264,3 +265,118 @@ class FSMNVADPipeline(BaseVADPipeline):
                 )
 
         return events, segments
+
+
+class TenVADPipeline(BaseVADPipeline):
+    """基于 TEN VAD 的分段实现，高性能低延迟。
+    
+    TEN VAD 特点：
+    - Chunk 大小：256 samples (16ms @ 16kHz)，比 Silero 更细粒度
+    - 更快的语音结束检测，适合实时对话场景
+    - 基于 C 动态库，计算效率高
+    """
+
+    type_name = "ten"
+
+    def __init__(self, config: dict):
+        super().__init__(RATE, config)
+        chunk_ms = (TEN_VAD_CHUNK / RATE) * 1000.0
+        self.pre_chunks = math.ceil(PRE_SPEECH_MS / chunk_ms)
+        self.stop_chunks = math.ceil(STOP_MS / chunk_ms)
+        self.max_chunks = math.ceil(MAX_DURATION_SECONDS / (TEN_VAD_CHUNK / RATE))
+
+        self.pre_buffer: Deque[np.ndarray] = deque(maxlen=self.pre_chunks)
+        self.segment: List[np.ndarray] = []
+        self.speech_active = False
+        self.trailing_silence = 0
+        self.since_trigger_chunks = 0
+        self.last_vad_speech: Optional[bool] = None
+        
+        # TEN VAD 使用动态阈值，从 config 获取
+        threshold = float(config.get("vad_threshold", VAD_THRESHOLD))
+        self.vad = TenVAD(hop_size=TEN_VAD_CHUNK, threshold=threshold)
+
+    @property
+    def chunk_size(self) -> int:
+        return TEN_VAD_CHUNK
+
+    def reset(self):
+        self.pre_buffer.clear()
+        self.segment.clear()
+        self.speech_active = False
+        self.trailing_silence = 0
+        self.since_trigger_chunks = 0
+        self.last_vad_speech = None
+        self.vad.reset()
+
+    def update_config(self, config: dict):
+        self.config = config
+        # TEN VAD 的阈值在内部使用，这里无需重建（概率判断在 process_chunk 中）
+
+    def process_chunk(self, chunk_int16: np.ndarray) -> tuple[List[dict], List[dict]]:
+        events: List[dict] = []
+        segments: List[dict] = []
+        
+        # TEN VAD 直接使用 int16 输入
+        vad_prob = float(self.vad.prob(chunk_int16))
+        vad_threshold = float(self.config.get("vad_threshold", VAD_THRESHOLD))
+        is_speech = vad_prob > vad_threshold
+        vad_prob_fmt = fmt4(vad_prob)
+        vad_threshold_fmt = fmt4(vad_threshold)
+        ts_ms = int(time.time() * 1000)
+
+        # 转换为 float32 用于 segment 存储（与其他 pipeline 保持一致）
+        chunk_f32 = (chunk_int16.astype(np.float32)) / 32768.0
+
+        if self.last_vad_speech is None or is_speech != self.last_vad_speech:
+            self.last_vad_speech = is_speech
+            events.append(
+                {
+                    "type": "vad",
+                    "speech": bool(is_speech),
+                    "probability": vad_prob_fmt,
+                    "vad_threshold": vad_threshold_fmt,
+                    "timestamp_ms": ts_ms,
+                }
+            )
+
+        if not self.speech_active:
+            self.pre_buffer.append(chunk_f32)
+            if is_speech:
+                self.segment = list(self.pre_buffer)
+                self.segment.append(chunk_f32)
+                self.speech_active = True
+                self.trailing_silence = 0
+                self.since_trigger_chunks = 1
+            return events, segments
+
+        self.segment.append(chunk_f32)
+        self.since_trigger_chunks += 1
+        self.trailing_silence = 0 if is_speech else self.trailing_silence + 1
+
+        segment_should_end = (
+            self.trailing_silence >= self.stop_chunks
+            or self.since_trigger_chunks >= self.max_chunks
+        )
+
+        if not segment_should_end:
+            return events, segments
+
+        audio = np.concatenate(self.segment, dtype=np.float32)
+        self._reset_segment_state()
+
+        segments.append(
+            {
+                "audio": audio,
+                "vad_probability": vad_prob,
+                "vad_speech": bool(is_speech),
+            }
+        )
+        return events, segments
+
+    def _reset_segment_state(self):
+        self.segment.clear()
+        self.speech_active = False
+        self.trailing_silence = 0
+        self.since_trigger_chunks = 0
+        self.pre_buffer.clear()

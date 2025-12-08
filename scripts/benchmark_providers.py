@@ -35,10 +35,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smart-turn-model",
         type=Path,
-        default=Path("ckpts/smart-turn-v3.0.onnx"),
+        # default=Path("onnx_model/smart-turn-v3.0.onnx"),
+        # default=Path("onnx_model/smart-turn-v3.1-cpu.onnx"),
+        default=Path("onnx_model/smart-turn-v3.1-gpu.onnx"),
         help="Path to Smart-Turn ONNX file",
     )
     parser.add_argument(
+        "-i",
         "--iterations",
         type=int,
         default=100,
@@ -48,7 +51,7 @@ def parse_args() -> argparse.Namespace:
         "--concurrency-levels",
         type=int,
         nargs="+",
-        default=[1, 4],
+        default=[1, 1, 2, 4, 8],  # first 1 for warmup
         help="Thread counts to benchmark (include 1 for single-thread latency)",
     )
     parser.add_argument(
@@ -201,6 +204,9 @@ def main() -> None:
         concurrency_levels = [1] + concurrency_levels
 
     extractor = WhisperFeatureExtractor(chunk_length=args.smart_turn_seconds)
+    
+    print(f"Using Silero VAD model: {silero_model}")
+    print(f"Using Smart-Turn model: {smart_turn_model}")
 
     for provider in provider_targets():
         provider_list = build_providers_list(provider)

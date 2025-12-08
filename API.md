@@ -5,7 +5,12 @@
 ## 概述
 - **协议**：WebSocket（客户端发送二进制音频帧，服务器返回 JSON 文本帧）
 - **编码**：小端 `int16` PCM，采样率 16 kHz，单声道
-- **内部处理（仅服务端关注）**：默认使用 Silero VAD（512 采样，约 32 ms），可在配置中切换 FSMN VAD（200 ms 分块）；VAD 判定语音段结束（至少 1 s 静音或达到 8 s 上限）即执行 `predict_endpoint`
+- **内部处理（仅服务端关注）**：支持三种 VAD 后端：
+  - **Silero VAD**（默认）：512 采样，约 32 ms 分块
+  - **TEN VAD**：256 采样，约 16 ms 分块，更低延迟
+  - **FSMN VAD**：200 ms 分块，需安装 funasr
+  
+  VAD 判定语音段结束（至少 1 s 静音或达到 8 s 上限）即执行 `predict_endpoint`
 
 ## 角色分工（先明确谁需要做什么）
 - 服务端：启动 `server.py`，下载/加载 VAD 与 Smart Turn 模型，负责分段与预测。
@@ -62,7 +67,7 @@ async def stream(audio_path: str):
         await ws.send(
             json.dumps(
                 {
-                    "vad_type": "silero",  # 可改为 fsmn
+                    "vad_type": "ten",  # 可改为 silero 或 fsmn
                     "vad_threshold": 0.6,
                     "prediction_threshold": 0.55,
                     "min_duration_seconds": 0.3,
@@ -100,15 +105,18 @@ asyncio.run(stream("/path/to/audio.raw"))
 > 所有返回中的浮点数均保留 4 位小数。
 
 ### 配置 JSON（客户端首帧及后续动态配置）
-- `vad_type`：字符串，默认 `silero`，可选 `fsmn`。切换为 `fsmn` 需要安装 `funasr` 并准备 FSMN VAD 模型（默认 `iic/speech_fsmn_vad_zh-cn-16k-common-pytorch`）。
-- `vad_threshold`：数值 `0-1`，默认 `0.5`，Silero VAD 判定语音的概率阈值。
+- `vad_type`：字符串，默认 `silero`，可选 `ten`、`fsmn`。
+  - `silero`：Silero VAD，32 ms 分块，广泛兼容
+  - `ten`：TEN VAD，16 ms 分块，更低延迟，适合实时对话（需要 `assets/ten_vad_python.*.so` 和 `assets/ten-vad.onnx`）
+  - `fsmn`：FSMN VAD，200 ms 分块，需要安装 `funasr` 并准备 FSMN VAD 模型
+- `vad_threshold`：数值 `0-1`，默认 `0.5`，VAD 判定语音的概率阈值。
 - `prediction_threshold`：数值 `0-1`，默认 `0.5`，端点概率阈值，大于该值输出 `prediction=1`。
 - `min_duration_seconds`：数值 `>=0`，默认 `0`。单段语音长度不足该值时不执行端点预测（会返回 `skip` 提示）。
 
 客户端发送示例（首条文本帧必须为配置）：
 ```json
 {
-    "vad_type": "silero",
+    "vad_type": "ten",
     "vad_threshold": 0.6,
     "prediction_threshold": 0.55,
     "min_duration_seconds": 0.3,
@@ -125,7 +133,7 @@ asyncio.run(stream("/path/to/audio.raw"))
         "vad_threshold": 0.6,
         "prediction_threshold": 0.55,
         "min_duration_seconds": 0.3,
-        "vad_type": "silero"
+        "vad_type": "ten"
     }
 }
 ```

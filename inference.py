@@ -4,7 +4,8 @@ import numpy as np
 import onnxruntime as ort
 from transformers import WhisperFeatureExtractor
 
-ONNX_MODEL_PATH = "ckpts/smart-turn-v3.0.onnx"
+ONNX_MODEL_PATH = "onnx_model/smart-turn-v3.0.onnx"
+# ONNX_MODEL_PATH = "onnx_model/smart-turn-v3.1-gpu.onnx"
 
 def build_session(onnx_path):
     so = ort.SessionOptions()

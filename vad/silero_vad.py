@@ -13,7 +13,7 @@ CHUNK = 512  # 512 samples @ 16 kHz ~= 32 ms
 ONNX_MODEL_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 )
-ONNX_MODEL_PATH = "ckpts/silero_vad.onnx"
+ONNX_MODEL_PATH = "onnx_model/silero_vad.onnx"
 
 # Reset VAD internal state every N seconds
 MODEL_RESET_STATES_TIME = 5.0
