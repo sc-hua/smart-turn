@@ -107,7 +107,7 @@ asyncio.run(stream("/path/to/audio.raw"))
 ### 配置 JSON（客户端首帧及后续动态配置）
 - `vad_type`：字符串，默认 `silero`，可选 `ten`、`fsmn`。
   - `silero`：Silero VAD，32 ms 分块，广泛兼容
-  - `ten`：TEN VAD，16 ms 分块，更低延迟，适合实时对话（需要 `assets/ten_vad_python.*.so` 和 `assets/ten-vad.onnx`）
+  - `ten`：TEN VAD，16 ms 分块，更低延迟，适合实时对话（需要 `onnx_model/ten_vad_python.*.so` 和 `onnx_model/ten-vad.onnx`）
   - `fsmn`：FSMN VAD，200 ms 分块，需要安装 `funasr` 并准备 FSMN VAD 模型
 - `vad_threshold`：数值 `0-1`，默认 `0.5`，VAD 判定语音的概率阈值。
 - `prediction_threshold`：数值 `0-1`，默认 `0.5`，端点概率阈值，大于该值输出 `prediction=1`。
