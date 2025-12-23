@@ -199,7 +199,7 @@ def parse_args():
     parser.add_argument("-d", "--device-index", type=int, default=None, help="PyAudio input device index.")
     parser.add_argument("-l", "--list-devices", action="store_true", help="List available input devices and exit.")
     parser.add_argument("--debug", action="store_true", help="Print send-side frame counters.")
-    parser.add_argument("--vad-type", choices=["silero", "fsmn"], default="silero", help="VAD 类型，默认为 silero，可选 fsmn。")
+    parser.add_argument("--vad-type", choices=["silero", "ten", "fsmn"], default="silero", help="VAD 类型，默认为 silero，可选 ten、fsmn。")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="VAD threshold, 0-1.")
     parser.add_argument(
         "--prediction-threshold",
