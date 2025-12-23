@@ -111,6 +111,8 @@ async def stream_microphone(
     prediction_threshold: float,
     min_duration_seconds: float,
     vad_type: str,
+    denoise_type: str,
+    denoise_mix: float,
 ):
     pa = pyaudio.PyAudio()
     stream = pa.open(
@@ -139,6 +141,8 @@ async def stream_microphone(
                 "vad_threshold": vad_threshold,
                 "prediction_threshold": prediction_threshold,
                 "min_duration_seconds": min_duration_seconds,
+                "denoise_type": denoise_type,
+                "denoise_mix": denoise_mix,
             }
         )
         await ws.send(config_msg)
@@ -201,6 +205,8 @@ def parse_args():
     parser.add_argument("--debug", action="store_true", help="Print send-side frame counters.")
     parser.add_argument("--vad-type", choices=["silero", "ten", "fsmn"], default="silero", help="VAD 类型，默认为 silero，可选 ten、fsmn。")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="VAD threshold, 0-1.")
+    parser.add_argument("--denoise-type", default="none", help="Denoise type: none, dtln, noisereduce.")
+    parser.add_argument("--denoise-mix", type=float, default=1.0, help="Denoise wet/dry mix ratio, 0-1 (1=full denoise).")
     parser.add_argument(
         "--prediction-threshold",
         type=float,
@@ -232,5 +238,7 @@ if __name__ == "__main__":
                 args.prediction_threshold,
                 args.min_duration_seconds,
                 args.vad_type,
+                args.denoise_type,
+                args.denoise_mix,
             )
         )

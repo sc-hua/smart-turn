@@ -44,6 +44,7 @@ import websockets
 from websockets.asyncio.server import serve
 
 from inference import predict_endpoint  # expects 16 kHz mono float32 input
+from denoise import DenoiseManager, list_denoisers
 from vad import (
     DEFAULT_VAD_TYPE,
     SUPPORTED_VAD_TYPES,
@@ -57,8 +58,11 @@ from vad import (
 )
 
 PREDICTION_THRESHOLD = 0.5
+DEFAULT_DENOISE_TYPE = "none"
+DEFAULT_DENOISE_MIX = 1.0
 MIN_DURATION_SECONDS = 0.0
 SHANGHAI_TZ = timezone(timedelta(hours=8))
+SUPPORTED_DENOISE_TYPES = set(list_denoisers())
 
 
 def format_config(cfg: dict) -> dict:
@@ -85,8 +89,11 @@ class StreamingEndpointSession:
             "prediction_threshold": PREDICTION_THRESHOLD,
             "min_duration_seconds": MIN_DURATION_SECONDS,
             "vad_type": DEFAULT_VAD_TYPE,
+            "denoise_type": DEFAULT_DENOISE_TYPE,
+            "denoise_mix": DEFAULT_DENOISE_MIX,
         }
         self.vad_pipeline = self._build_vad_pipeline(self.config["vad_type"])
+        self.denoise_manager = DenoiseManager(sample_rate=RATE, config=self.config)
         self.active_segment_id = None
         self.next_segment_id = 1
 
@@ -102,7 +109,7 @@ class StreamingEndpointSession:
         self.vad_pipeline = self._build_vad_pipeline(vad_type)
 
     def apply_config(self, config: dict) -> dict:
-        """Apply client配置，当前支持 vad_threshold/prediction_threshold/min_duration_seconds/vad_type。"""
+        """Apply client配置，当前支持 vad_threshold/prediction_threshold/min_duration_seconds/vad_type/denoise_type/denoise_mix。"""
         if not isinstance(config, dict):
             raise ValueError("config must be a JSON object")
 
@@ -111,6 +118,8 @@ class StreamingEndpointSession:
             "prediction_threshold",
             "min_duration_seconds",
             "vad_type",
+            "denoise_type",
+            "denoise_mix",
         }
         if unknown_keys:
             raise ValueError(f"unsupported config fields: {', '.join(sorted(unknown_keys))}")
@@ -147,6 +156,21 @@ class StreamingEndpointSession:
             if vad_type not in SUPPORTED_VAD_TYPES:
                 raise ValueError(f"vad_type must be one of: {', '.join(sorted(SUPPORTED_VAD_TYPES))}")
             new_config["vad_type"] = vad_type
+        if "denoise_type" in config:
+            denoise_type = str(config["denoise_type"]).strip().lower()
+            if denoise_type not in SUPPORTED_DENOISE_TYPES:
+                raise ValueError(
+                    f"denoise_type must be one of: {', '.join(sorted(SUPPORTED_DENOISE_TYPES))}"
+                )
+            new_config["denoise_type"] = denoise_type
+        if "denoise_mix" in config:
+            try:
+                denoise_mix = float(config["denoise_mix"])
+            except (TypeError, ValueError):
+                raise ValueError("denoise_mix must be a number between 0 and 1")
+            if not 0.0 <= denoise_mix <= 1.0:
+                raise ValueError("denoise_mix must be between 0 and 1")
+            new_config["denoise_mix"] = denoise_mix
 
         switched_type = new_config.get("vad_type") != self.config.get("vad_type")
         self.config = new_config
@@ -156,12 +180,19 @@ class StreamingEndpointSession:
         else:
             self.vad_pipeline.update_config(self.config)
 
+        # Update denoise manager with new config
+        try:
+            self.denoise_manager.update_config(self.config)
+        except Exception as exc:
+            raise ValueError(f"denoise config error: {exc}") from exc
+
         return dict(self.config)
 
     def reset(self):
         """Clear VAD buffers and segment state."""
         self.leftover = np.array([], dtype=np.int16)
         self.vad_pipeline.reset()
+        self.denoise_manager.reset()
 
     def process_audio(self, int16_audio: np.ndarray) -> List[dict]:
         """
@@ -246,7 +277,13 @@ class StreamingEndpointSession:
             return events
 
         t0 = time.perf_counter()
-        result = predict_endpoint(audio.astype(np.float32))
+
+        # Apply denoising before endpoint prediction
+        audio_f32 = audio.astype(np.float32)
+        denoise_result = self.denoise_manager.process(audio_f32)
+        audio_for_prediction = denoise_result.audio
+
+        result = predict_endpoint(audio_for_prediction)
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         prob = float(result.get("probability", 0.0))
@@ -255,21 +292,34 @@ class StreamingEndpointSession:
         pred_threshold_fmt = fmt4(pred_threshold)
         pred = 1 if prob > pred_threshold else 0
 
-        events.append(
-            {
-                "type": "prediction",
-                "segment_id": segment_id,
-                "prediction": pred,
-                "probability": prob_fmt,
-                "duration_seconds": dur_sec_fmt,
-                "inference_ms": fmt4(latency_ms),
-                "timestamp_ms": int(time.time() * 1000),
-                "vad_probability": vad_prob,
-                "vad_speech": vad_speech,
-                "vad_threshold": vad_threshold_fmt,
-                "prediction_threshold": pred_threshold_fmt,
-            }
-        )
+        # Build prediction payload with denoise info
+        payload = {
+            "type": "prediction",
+            "segment_id": segment_id,
+            "prediction": pred,
+            "probability": prob_fmt,
+            "duration_seconds": dur_sec_fmt,
+            "inference_ms": fmt4(latency_ms),
+            "timestamp_ms": int(time.time() * 1000),
+            "vad_probability": vad_prob,
+            "vad_speech": vad_speech,
+            "vad_threshold": vad_threshold_fmt,
+            "prediction_threshold": pred_threshold_fmt,
+            "denoise_type": denoise_result.denoise_type,
+            "denoise_mix": fmt4(denoise_result.denoise_mix),
+            "denoise_applied": denoise_result.applied,
+            "denoise_status": denoise_result.status.value,
+        }
+
+        # Add optional denoise fields
+        if denoise_result.latency_ms is not None:
+            payload["denoise_ms"] = fmt4(denoise_result.latency_ms)
+        if denoise_result.error:
+            payload["denoise_error"] = denoise_result.error
+        if denoise_result.skip_reason:
+            payload["denoise_skip_reason"] = denoise_result.skip_reason
+
+        events.append(payload)
         return events
 
 
@@ -286,14 +336,17 @@ async def handle_connection(websocket):
             "prediction_threshold": PREDICTION_THRESHOLD,
             "min_duration_seconds": MIN_DURATION_SECONDS,
             "vad_type": DEFAULT_VAD_TYPE,
+            "denoise_type": DEFAULT_DENOISE_TYPE,
+            "denoise_mix": DEFAULT_DENOISE_MIX,
         }
     )
     await websocket.send(
         json.dumps(
             {
                 "type": "ready",
-                "message": 'send config JSON as first text frame (e.g. {"vad_type": "silero", "vad_threshold": 0.5, "prediction_threshold": 0.5}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
+                "message": 'send config JSON as first text frame (e.g. {"vad_type": "silero", "vad_threshold": 0.5, "denoise_type": "none"}), then 16kHz mono int16 PCM as binary frames; text "reset" to clear state',
                 "defaults": ready_defaults,
+                "supported_denoise_types": sorted(SUPPORTED_DENOISE_TYPES),
                 "session_id": session_id,
             }
         )
